@@ -1,0 +1,1374 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from logging import getLogger\n",
+    "from itertools import product\n",
+    "from utils.dataset import RecDataset\n",
+    "from utils.dataloader import TrainDataLoader, EvalDataLoader\n",
+    "from utils.logger import init_logger\n",
+    "from utils.configurator import Config\n",
+    "from utils.utils import init_seed, get_model, get_trainer, dict2str\n",
+    "import platform\n",
+    "import os"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Dataset\n",
+    "baby, clothing, elec 카테고리로 이루어져 있음. "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "(ex)baby \n",
+    "baby.inter - (UserID, itemID, rating, timestamp, x_label(???)) \n",
+    "i_id_mapping - (asin, itemID) asin- item code (ex)097293751X\t0\n",
+    "u_id_mapping - (asin, userOD) (ex)097293751X\t0\n",
+    "image_feat.npy - item image feature embedding\n",
+    "text_feat.npy - text image feature embedding\n",
+    "user_graph_dict.npy - \n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "[[0.         0.         0.         ... 0.         0.56620002 1.2457    ]\n",
+      " [0.         0.         0.         ... 0.         1.88339996 0.23909999]\n",
+      " [0.         0.         0.         ... 0.         0.         4.71360016]\n",
+      " ...\n",
+      " [0.         0.         0.         ... 1.86619997 0.         0.        ]\n",
+      " [1.61899996 0.91079998 0.         ... 1.51030004 0.         2.83529997]\n",
+      " [0.         0.         0.         ... 0.         0.42070001 4.59919977]]\n",
+      "배열의 형태: (7050, 4096)\n",
+      "배열의 데이터 타입: float64\n"
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "\n",
+    "# .npy 파일 경로\n",
+    "file_path = '/home/sh0408sh/MMRec/data/baby-20240717T113127Z-001/baby/image_feat.npy'\n",
+    "\n",
+    "# .npy 파일 읽기\n",
+    "data = np.load(file_path, allow_pickle=True)\n",
+    "\n",
+    "# 데이터 확인\n",
+    "print(data)\n",
+    "print(\"배열의 형태:\", data.shape) # (7050, 4096) - 7050개의 item image feature embedding(dimension = 4096)\n",
+    "print(\"배열의 데이터 타입:\", data.dtype)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "num of item : 7050 \n",
+    "item image embedding : 4096\n",
+    "item text embedding : 384"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### main.py\n",
+    "model, dataset, Mirror Gradient값을 받아서 quick start  실행\n",
+    "\n",
+    "(ex)python main.py --model BM3 --dataset baby mg --True"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "if __name__ == '__main__':\n",
+    "    parser = argparse.ArgumentParser()\n",
+    "    parser.add_argument('--model', '-m', type=str, default='SELFCFED_LGN', help='name of models')\n",
+    "    parser.add_argument('--dataset', '-d', type=str, default='baby', help='name of datasets')\n",
+    "    parser.add_argument('--mg', action=\"store_true\", help='whether to use Mirror Gradient, default is False')\n",
+    "\n",
+    "    config_dict = {\n",
+    "        'gpu_id': 0,\n",
+    "    }\n",
+    "\n",
+    "    args, _ = parser.parse_known_args()\n",
+    "\n",
+    "    quick_start(model=args.model, dataset=args.dataset, config_dict=config_dict, save_model=True, mg=args.mg)\n",
+    "    "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### quick_start의 구조\n",
+    "\n",
+    "input : model, dataset\n",
+    "1. merg config dict : 학습에 관한 정보 config 객체를 만듦\n",
+    "2. Dataset 객체 생성 : \n",
+    "3. DataLoader\n",
+    "4. Run model"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "1. merge config dict\n",
+    "\n",
+    "MMRec/src/utils/configurator.py"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "\n",
+       "gpu_id=0\n",
+       "use_gpu=True\n",
+       "seed=[999]\n",
+       "data_path=../data/\n",
+       "inter_splitting_label=x_label\n",
+       "filter_out_cod_start_users=True\n",
+       "is_multimodal_model=True\n",
+       "checkpoint_dir=saved\n",
+       "save_recommended_topk=True\n",
+       "recommend_topk=recommend_topk/\n",
+       "embedding_size=64\n",
+       "weight_decay=0.0\n",
+       "req_training=True\n",
+       "epochs=1000\n",
+       "stopping_step=20\n",
+       "train_batch_size=2048\n",
+       "learner=adam\n",
+       "learning_rate=0.001\n",
+       "learning_rate_scheduler=[1.0, 50]\n",
+       "eval_step=1\n",
+       "training_neg_sample_num=1\n",
+       "use_neg_sampling=False\n",
+       "use_full_sampling=False\n",
+       "NEG_PREFIX=neg__\n",
+       "USER_ID_FIELD=userID\n",
+       "ITEM_ID_FIELD=itemID\n",
+       "TIME_FIELD=timestamp\n",
+       "field_separator=\t\n",
+       "metrics=['Recall', 'NDCG', 'Precision', 'MAP']\n",
+       "topk=[5, 10, 20, 50]\n",
+       "valid_metric=Recall@20\n",
+       "eval_batch_size=4096\n",
+       "use_raw_features=False\n",
+       "max_txt_len=32\n",
+       "max_img_size=256\n",
+       "vocab_size=30522\n",
+       "type_vocab_size=2\n",
+       "hidden_size=4\n",
+       "pad_token_id=0\n",
+       "max_position_embeddings=512\n",
+       "layer_norm_eps=1e-12\n",
+       "hidden_dropout_prob=0.1\n",
+       "end2end=False\n",
+       "hyper_parameters=['seed', 'n_layers', 'reg_weight', 'dropout']\n",
+       "inter_file_name=baby.inter\n",
+       "vision_feature_file=image_feat.npy\n",
+       "text_feature_file=text_feat.npy\n",
+       "user_graph_dict_file=user_graph_dict.npy\n",
+       "feat_embed_dim=64\n",
+       "n_layers=[1, 2]\n",
+       "dropout=[0.3, 0.5]\n",
+       "reg_weight=[0.1, 0.01]\n",
+       "cl_weight=2.0\n",
+       "model=BM3\n",
+       "dataset=baby\n",
+       "valid_metric_bigger=True\n",
+       "device=cuda\n"
+      ]
+     },
+     "execution_count": 3,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# merge config dict\n",
+    "config_dict = {\n",
+    "        'gpu_id': 0,\n",
+    "    }\n",
+    "model = 'BM3'\n",
+    "dataset = 'baby'\n",
+    "\n",
+    "\n",
+    "config = Config(model, dataset, config_dict, mg = False)\n",
+    "config\n",
+    "\n",
+    "# _load_dataset_model_config 함수 :  config + overall.yaml + dataset.yaml + model.yaml\n",
+    "# overall - training setting /home/sh0408sh/MMRec/src/configs/overall.yaml\n",
+    "# dataset.yaml \n",
+    "# model. yaml - hyper parameter에 대한 정보"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "2. Dataset 객체 생성\n",
+    "\n",
+    "MMRec/src/utils/dataset.py"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "baby\n",
+       "The number of users: 19445\n",
+       "Average actions of users: 8.269066598097197\n",
+       "The number of items: 7050\n",
+       "Average actions of items: 22.807375886524824\n",
+       "The number of inters: 160792\n",
+       "The sparsity of the dataset: 99.8827082752043%"
+      ]
+     },
+     "execution_count": 6,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# load data : config에 있는 정보들을 이용해 RecDataset에 대한 객체 생성. 객체 내의 attribute에 dataset에 대한 다양한 정보가 포함됨\n",
+    "\n",
+    "dataset = RecDataset(config)\n",
+    "dataset"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "baby\n",
+      "/home/sh0408sh/MMRec/data/baby\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(dataset.dataset_name)\n",
+    "print(dataset.dataset_path)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "userID\n",
+      "itemID\n",
+      "x_label\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(dataset.uid_field)\n",
+    "print(dataset.iid_field)\n",
+    "print(dataset.splitting_label)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>userID</th>\n",
+       "      <th>itemID</th>\n",
+       "      <th>x_label</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>0</td>\n",
+       "      <td>1587</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>0</td>\n",
+       "      <td>1879</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>0</td>\n",
+       "      <td>0</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>0</td>\n",
+       "      <td>1922</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>0</td>\n",
+       "      <td>3870</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>...</th>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "      <td>...</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160787</th>\n",
+       "      <td>19444</td>\n",
+       "      <td>7022</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160788</th>\n",
+       "      <td>19444</td>\n",
+       "      <td>6959</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160789</th>\n",
+       "      <td>19444</td>\n",
+       "      <td>7005</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160790</th>\n",
+       "      <td>19444</td>\n",
+       "      <td>7023</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>160791</th>\n",
+       "      <td>19444</td>\n",
+       "      <td>6994</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "<p>160792 rows × 3 columns</p>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "        userID  itemID  x_label\n",
+       "0            0    1587        0\n",
+       "1            0    1879        0\n",
+       "2            0       0        0\n",
+       "3            0    1922        1\n",
+       "4            0    3870        2\n",
+       "...        ...     ...      ...\n",
+       "160787   19444    7022        0\n",
+       "160788   19444    6959        0\n",
+       "160789   19444    7005        0\n",
+       "160790   19444    7023        1\n",
+       "160791   19444    6994        2\n",
+       "\n",
+       "[160792 rows x 3 columns]"
+      ]
+     },
+     "execution_count": 9,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "dataset.df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "baby.inter\n",
+      "None\n",
+      "7050\n",
+      "19445\n"
+     ]
+    }
+   ],
+   "source": [
+    "# load rating file from data path?\n",
+    "print(config['inter_file_name'])\n",
+    "print(dataset.load_inter_graph(config['inter_file_name']))\n",
+    "print(dataset.item_num)\n",
+    "print(dataset.user_num)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# RecDataset의 load_inter_graph 함수\n",
+    "def load_inter_graph(self, file_name):\n",
+    "        inter_file = os.path.join(self.dataset_path, file_name)\n",
+    "        cols = [self.uid_field, self.iid_field, self.splitting_label]\n",
+    "        self.df = pd.read_csv(inter_file, usecols=cols, sep=self.config['field_separator'])\n",
+    "        if not self.df.columns.isin(cols).all():\n",
+    "            raise ValueError('File {} lost some required columns.'.format(inter_file))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# data split\n",
+    "train_dataset, valid_dataset, test_dataset = dataset.split()\n",
+    "# data spliting label (x label)을 이용해 data slit"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# split 함수 구조\n",
+    "def split(self):\n",
+    "        dfs = []\n",
+    "        # splitting into training/validation/test\n",
+    "        for i in range(3):\n",
+    "            temp_df = self.df[self.df[self.splitting_label] == i].copy()\n",
+    "            temp_df.drop(self.splitting_label, inplace=True, axis=1)        # no use again\n",
+    "            dfs.append(temp_df)\n",
+    "        if self.config['filter_out_cod_start_users']:\n",
+    "            # filtering out new users in val/test sets\n",
+    "            train_u = set(dfs[0][self.uid_field].values)\n",
+    "            for i in [1, 2]:\n",
+    "                dropped_inter = pd.Series(True, index=dfs[i].index)\n",
+    "                dropped_inter ^= dfs[i][self.uid_field].isin(train_u)\n",
+    "                dfs[i].drop(dfs[i].index[dropped_inter], inplace=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "3. Dataloader : config(학습에 대한 정보)와 dataset 객체를 통합함. 그외에 batch size, negative sampling, shuffle 유무에 대한 정보도 더해줌\n",
+    "\n",
+    "class TrainDataLoader(AbstractDataLoader), EvalDataLoader(AbstractDataLoader)\n",
+    "\n",
+    "\n",
+    "MMRec/src/utils/dataloader.py"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "AttributeError",
+     "evalue": "'RecDataset' object has no attribute 'inter_num'",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mAttributeError\u001b[0m                            Traceback (most recent call last)",
+      "Cell \u001b[0;32mIn[12], line 1\u001b[0m\n\u001b[0;32m----> 1\u001b[0m \u001b[43mtrain_dataset\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43minter_num\u001b[49m \n",
+      "\u001b[0;31mAttributeError\u001b[0m: 'RecDataset' object has no attribute 'inter_num'"
+     ]
+    }
+   ],
+   "source": [
+    "train_dataset.inter_num \n",
+    "# self.sparsity = 1 - self.dataset.inter_num / self.dataset.user_num / self.dataset.item_num\n",
+    "# data loader내의 sparsity에 대한 식의 dataset.iner_num이 error를 일으킴. \n",
+    "# dataset.inter_num은 RecDataset class 의 __str__함수에서 생성되는 attribute임. 전역 변수가 아니라서?\n",
+    "# 근데 파일을 돌릴 때는 단 한 번도 오류가 난적이 없고 여기서 간단하게 돌려볼 때도 에러가 났다가 안났다함.\n",
+    "\n",
+    "#일단은 self.dataset.inter_num을 __str__안의 정의 되로 수정해주었음\n",
+    "# self.sparsity = 1 - len(self.dataset.df)/ self.dataset.user_num / self.dataset.item_num"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# from utils.dataloader import TrainDataLoader, EvalDataLoader\n",
+    "# wrap into dataloader\n",
+    "train_data = TrainDataLoader(config, train_dataset, batch_size=config['train_batch_size'], shuffle=True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "(valid_data, test_data) = (\n",
+    "    EvalDataLoader(config, valid_dataset, additional_dataset=train_dataset, batch_size=config['eval_batch_size']),\n",
+    "    EvalDataLoader(config, test_dataset, additional_dataset=train_dataset, batch_size=config['eval_batch_size']))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class TrainDataLoader(AbstractDataLoader):\n",
+    "    \"\"\"\n",
+    "    General dataloader with negative sampling.\n",
+    "    \"\"\"\n",
+    "    def __init__(self, config, dataset, batch_size=1, shuffle=False):\n",
+    "        super().__init__(config, dataset, additional_dataset=None,\n",
+    "                         batch_size=batch_size, neg_sampling=True, shuffle=shuffle)\n",
+    "\n",
+    "        # special for training dataloader\n",
+    "        self.history_items_per_u = dict()\n",
+    "        # full items in training.\n",
+    "        self.all_items = self.dataset.df[self.dataset.iid_field].unique().tolist()\n",
+    "        self.all_uids = self.dataset.df[self.dataset.uid_field].unique()\n",
+    "        self.all_items_set = set(self.all_items)\n",
+    "        self.all_users_set = set(self.all_uids)\n",
+    "        self.all_item_len = len(self.all_items)\n",
+    "        # if full sampling\n",
+    "        self.use_full_sampling = config['use_full_sampling']\n",
+    "\n",
+    "        if config['use_neg_sampling']:\n",
+    "            if self.use_full_sampling:\n",
+    "                self.sample_func = self._get_full_uids_sample\n",
+    "            else:\n",
+    "                self.sample_func = self._get_neg_sample\n",
+    "        else:\n",
+    "            self.sample_func = self._get_non_neg_sample\n",
+    "\n",
+    "        self._get_history_items_u()\n",
+    "        self.neighborhood_loss_required = config['use_neighborhood_loss']\n",
+    "        if self.neighborhood_loss_required:\n",
+    "            self.history_users_per_i = {}\n",
+    "            self._get_history_users_i()\n",
+    "            self.user_user_dict = self._get_my_neighbors(self.config['USER_ID_FIELD'])\n",
+    "            self.item_item_dict = self._get_my_neighbors(self.config['ITEM_ID_FIELD'])\n",
+    "\n",
+    "    def pretrain_setup(self):\n",
+    "        \"\"\"\n",
+    "        Reset dataloader. Outputing the same positive & negative samples with each training.\n",
+    "        :return:\n",
+    "        \"\"\"\n",
+    "        # sort & random\n",
+    "        if self.shuffle:\n",
+    "            self.dataset = self.dataset_bk.copy(self.dataset_bk.df)\n",
+    "        self.all_items.sort()\n",
+    "        if self.use_full_sampling:\n",
+    "            self.all_uids.sort()\n",
+    "        random.shuffle(self.all_items)\n",
+    "        # reorder dataset as default (chronological order)\n",
+    "        #self.dataset.sort_by_chronological()\n",
+    "\n",
+    "    def inter_matrix(self, form='coo', value_field=None):\n",
+    "        \"\"\"Get sparse matrix that describe interactions between user_id and item_id.\n",
+    "\n",
+    "        Sparse matrix has shape (user_num, item_num).\n",
+    "\n",
+    "        For a row of <src, tgt>, ``matrix[src, tgt] = 1`` if ``value_field`` is ``None``,\n",
+    "        else ``matrix[src, tgt] = self.inter_feat[src, tgt]``.\n",
+    "\n",
+    "        Args:\n",
+    "            form (str, optional): Sparse matrix format. Defaults to ``coo``.\n",
+    "            value_field (str, optional): Data of sparse matrix, which should exist in ``df_feat``.\n",
+    "                Defaults to ``None``.\n",
+    "\n",
+    "        Returns:\n",
+    "            scipy.sparse: Sparse matrix in form ``coo`` or ``csr``.\n",
+    "        \"\"\"\n",
+    "        if not self.dataset.uid_field or not self.dataset.iid_field:\n",
+    "            raise ValueError('dataset doesn\\'t exist uid/iid, thus can not converted to sparse matrix')\n",
+    "        return self._create_sparse_matrix(self.dataset.df, self.dataset.uid_field,\n",
+    "                                          self.dataset.iid_field, form, value_field)\n",
+    "\n",
+    "    def _create_sparse_matrix(self, df_feat, source_field, target_field, form='coo', value_field=None):\n",
+    "        \"\"\"Get sparse matrix that describe relations between two fields.\n",
+    "\n",
+    "        Source and target should be token-like fields.\n",
+    "\n",
+    "        Sparse matrix has shape (``self.num(source_field)``, ``self.num(target_field)``).\n",
+    "\n",
+    "        For a row of <src, tgt>, ``matrix[src, tgt] = 1`` if ``value_field`` is ``None``,\n",
+    "        else ``matrix[src, tgt] = df_feat[value_field][src, tgt]``.\n",
+    "\n",
+    "        Args:\n",
+    "            df_feat (pandas.DataFrame): Feature where src and tgt exist.\n",
+    "            form (str, optional): Sparse matrix format. Defaults to ``coo``.\n",
+    "            value_field (str, optional): Data of sparse matrix, which should exist in ``df_feat``.\n",
+    "                Defaults to ``None``.\n",
+    "\n",
+    "        Returns:\n",
+    "            scipy.sparse: Sparse matrix in form ``coo`` or ``csr``.\n",
+    "        \"\"\"\n",
+    "        src = df_feat[source_field].values\n",
+    "        tgt = df_feat[target_field].values\n",
+    "        if value_field is None:\n",
+    "            data = np.ones(len(df_feat))\n",
+    "        else:\n",
+    "            if value_field not in df_feat.columns:\n",
+    "                raise ValueError('value_field [{}] should be one of `df_feat`\\'s features.'.format(value_field))\n",
+    "            data = df_feat[value_field].values\n",
+    "        mat = coo_matrix((data, (src, tgt)), shape=(self.dataset.user_num, self.dataset.item_num))\n",
+    "\n",
+    "        if form == 'coo':\n",
+    "            return mat\n",
+    "        elif form == 'csr':\n",
+    "            return mat.tocsr()\n",
+    "        else:\n",
+    "            raise NotImplementedError('sparse matrix format [{}] has not been implemented.'.format(form))\n",
+    "\n",
+    "    @property\n",
+    "    def pr_end(self):\n",
+    "        if self.use_full_sampling:\n",
+    "            return len(self.all_uids)\n",
+    "        return len(self.dataset)\n",
+    "\n",
+    "    def _shuffle(self):\n",
+    "        self.dataset.shuffle()\n",
+    "        if self.use_full_sampling:\n",
+    "            np.random.shuffle(self.all_uids)\n",
+    "\n",
+    "    def _next_batch_data(self):\n",
+    "        return self.sample_func()\n",
+    "\n",
+    "    def _get_neg_sample(self):\n",
+    "        cur_data = self.dataset[self.pr: self.pr + self.step]\n",
+    "        self.pr += self.step\n",
+    "        # to tensor\n",
+    "        user_tensor = torch.tensor(cur_data[self.config['USER_ID_FIELD']].values).type(torch.LongTensor).to(self.device)\n",
+    "        item_tensor = torch.tensor(cur_data[self.config['ITEM_ID_FIELD']].values).type(torch.LongTensor).to(self.device)\n",
+    "        batch_tensor = torch.cat((torch.unsqueeze(user_tensor, 0),\n",
+    "                                  torch.unsqueeze(item_tensor, 0)))\n",
+    "        u_ids = cur_data[self.config['USER_ID_FIELD']]\n",
+    "        # sampling negative items only in the dataset (train)\n",
+    "        neg_ids = self._sample_neg_ids(u_ids).to(self.device)\n",
+    "        # for neighborhood loss\n",
+    "        if self.neighborhood_loss_required:\n",
+    "            i_ids = cur_data[self.config['ITEM_ID_FIELD']]\n",
+    "            pos_neighbors, neg_neighbors = self._get_neighborhood_samples(i_ids, self.config['ITEM_ID_FIELD'])\n",
+    "            pos_neighbors, neg_neighbors = pos_neighbors.to(self.device), neg_neighbors.to(self.device)\n",
+    "\n",
+    "            batch_tensor = torch.cat((batch_tensor, neg_ids.unsqueeze(0),\n",
+    "                                      pos_neighbors.unsqueeze(0), neg_neighbors.unsqueeze(0)))\n",
+    "\n",
+    "        # merge negative samples\n",
+    "        else:\n",
+    "            batch_tensor = torch.cat((batch_tensor, neg_ids.unsqueeze(0)))\n",
+    "\n",
+    "        return batch_tensor"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class EvalDataLoader(AbstractDataLoader):\n",
+    "    \"\"\"\n",
+    "        additional_dataset: training dataset in evaluation\n",
+    "    \"\"\"\n",
+    "    def __init__(self, config, dataset, additional_dataset=None,\n",
+    "                 batch_size=1, shuffle=False):\n",
+    "        super().__init__(config, dataset, additional_dataset=additional_dataset,\n",
+    "                         batch_size=batch_size, neg_sampling=False, shuffle=shuffle)\n",
+    "\n",
+    "        if additional_dataset is None:\n",
+    "            raise ValueError('Training datasets is nan')\n",
+    "        self.eval_items_per_u = []\n",
+    "        self.eval_len_list = []\n",
+    "        self.train_pos_len_list = []\n",
+    "\n",
+    "        self.eval_u = self.dataset.df[self.dataset.uid_field].unique()\n",
+    "        # special for eval dataloader\n",
+    "        self.pos_items_per_u = self._get_pos_items_per_u(self.eval_u).to(self.device)\n",
+    "        self._get_eval_items_per_u(self.eval_u)\n",
+    "        # to device\n",
+    "        self.eval_u = torch.tensor(self.eval_u).type(torch.LongTensor).to(self.device)\n",
+    "\n",
+    "    @property\n",
+    "    def pr_end(self):\n",
+    "        return self.eval_u.shape[0]\n",
+    "\n",
+    "    def _shuffle(self):\n",
+    "        self.dataset.shuffle()\n",
+    "\n",
+    "    def _next_batch_data(self):\n",
+    "        inter_cnt = sum(self.train_pos_len_list[self.pr: self.pr+self.step])\n",
+    "        batch_users = self.eval_u[self.pr: self.pr + self.step]\n",
+    "        batch_mask_matrix = self.pos_items_per_u[:, self.inter_pr: self.inter_pr+inter_cnt].clone()\n",
+    "        # user_ids to index\n",
+    "        batch_mask_matrix[0] -= self.pr\n",
+    "        self.inter_pr += inter_cnt\n",
+    "        self.pr += self.step\n",
+    "\n",
+    "        return [batch_users, batch_mask_matrix]\n",
+    "\n",
+    "    def _get_pos_items_per_u(self, eval_users):\n",
+    "        \"\"\"\n",
+    "        history items in training dataset.\n",
+    "        masking out positive items in evaluation\n",
+    "        :return:\n",
+    "        user_id - item_ids matrix\n",
+    "        [[0, 0, ... , 1, ...],\n",
+    "         [0, 1, ... , 0, ...]]\n",
+    "        \"\"\"\n",
+    "        uid_field = self.additional_dataset.uid_field\n",
+    "        iid_field = self.additional_dataset.iid_field\n",
+    "        # load avail items for all uid\n",
+    "        uid_freq = self.additional_dataset.df.groupby(uid_field)[iid_field]\n",
+    "        u_ids = []\n",
+    "        i_ids = []\n",
+    "        for i, u in enumerate(eval_users):\n",
+    "            u_ls = uid_freq.get_group(u).values\n",
+    "            i_len = len(u_ls)\n",
+    "            self.train_pos_len_list.append(i_len)\n",
+    "            u_ids.extend([i]*i_len)\n",
+    "            i_ids.extend(u_ls)\n",
+    "        return torch.tensor([u_ids, i_ids]).type(torch.LongTensor)\n",
+    "\n",
+    "    def _get_eval_items_per_u(self, eval_users):\n",
+    "        \"\"\"\n",
+    "        get evaluated items for each u\n",
+    "        :return:\n",
+    "        \"\"\"\n",
+    "        uid_field = self.dataset.uid_field\n",
+    "        iid_field = self.dataset.iid_field\n",
+    "        # load avail items for all uid\n",
+    "        uid_freq = self.dataset.df.groupby(uid_field)[iid_field]\n",
+    "        for u in eval_users:\n",
+    "            u_ls = uid_freq.get_group(u).values\n",
+    "            self.eval_len_list.append(len(u_ls))\n",
+    "            self.eval_items_per_u.append(u_ls)\n",
+    "        self.eval_len_list = np.asarray(self.eval_len_list)\n",
+    "\n",
+    "    # return pos_items for each u\n",
+    "    def get_eval_items(self):\n",
+    "        return self.eval_items_per_u\n",
+    "\n",
+    "    def get_eval_len_list(self):\n",
+    "        return self.eval_len_list\n",
+    "\n",
+    "    def get_eval_users(self):\n",
+    "        return self.eval_u.cpu()\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "4. Run model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "############ Dataset loadded, run model\n",
+    "hyper_ret = []\n",
+    "val_metric = config['valid_metric'].lower()\n",
+    "best_test_value = 0.0\n",
+    "idx = best_test_idx = 0"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "'recall@20'"
+      ]
+     },
+     "execution_count": 18,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "val_metric"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# hyper-parameters\n",
+    "hyper_ls = []\n",
+    "if \"seed\" not in config['hyper_parameters']:\n",
+    "    config['hyper_parameters'] = ['seed'] + config['hyper_parameters']\n",
+    "for i in config['hyper_parameters']:\n",
+    "    hyper_ls.append(config[i] or [None])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['seed', 'n_layers', 'reg_weight', 'dropout']"
+      ]
+     },
+     "execution_count": 21,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "config['hyper_parameters']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[[999], [1, 2], [0.1, 0.01], [0.3, 0.5]]"
+      ]
+     },
+     "execution_count": 20,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "hyper_ls\n",
+    "# 총 1*2*2*2 = 8 case에 대한 학습을 진행함"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# combinations\n",
+    "combinators = list(product(*hyper_ls))\n",
+    "total_loops = len(combinators)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[(999, 1, 0.1, 0.3),\n",
+       " (999, 1, 0.1, 0.5),\n",
+       " (999, 1, 0.01, 0.3),\n",
+       " (999, 1, 0.01, 0.5),\n",
+       " (999, 2, 0.1, 0.3),\n",
+       " (999, 2, 0.1, 0.5),\n",
+       " (999, 2, 0.01, 0.3),\n",
+       " (999, 2, 0.01, 0.5)]"
+      ]
+     },
+     "execution_count": 23,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# hyperparameter 조정\n",
+    "combinators "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "8"
+      ]
+     },
+     "execution_count": 25,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# 총 학습 횟수\n",
+    "total_loops"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "for hyper_tuple in combinators:\n",
+    "        # random seed reset\n",
+    "        for j, k in zip(config['hyper_parameters'], hyper_tuple):\n",
+    "            config[j] = k\n",
+    "        init_seed(config['seed'])\n",
+    "\n",
+    "        logger.info('========={}/{}: Parameters:{}={}======='.format(\n",
+    "            idx+1, total_loops, config['hyper_parameters'], hyper_tuple))\n",
+    "        # (example)Tue 16 Jul 2024 19:29:13 INFO =========1/8: Parameters:['seed', 'n_layers', 'reg_weight', 'dropout']=(999, 1, 0.1, 0.3)=======\n",
+    "\n",
+    "        # set random state of dataloader : TrainDataLoader의 pretrain_setup 함수 - sampling을 위한 과정?\n",
+    "        train_data.pretrain_setup()\n",
+    "\n",
+    "        # model loading and initialization\n",
+    "        # get_model : from utils.utils import get_model - return model_class = getattr(model_modeul, model_name)\n",
+    "        model = get_model(config['model'])(config, train_data).to(config['device'])\n",
+    "        logger.info(model)\n",
+    "        \"\"\"\n",
+    "        (ex)\n",
+    "        Tue 16 Jul 2024 19:29:15 INFO BM3(\n",
+    "    (user_embedding): Embedding(19445, 64)\n",
+    "    (item_id_embedding): Embedding(7050, 64)\n",
+    "    (predictor): Linear(in_features=64, out_features=64, bias=True)\n",
+    "    (reg_loss): EmbLoss()\n",
+    "    (image_embedding): Embedding(7050, 4096)\n",
+    "    (image_trs): Linear(in_features=4096, out_features=64, bias=True)\n",
+    "    (text_embedding): Embedding(7050, 384)\n",
+    "    text_trs): Linear(in_features=384, out_features=64, bias=True)\n",
+    "    )\n",
+    "    Trainable parameters: 33570688  \n",
+    "        \"\"\"\n",
+    "\n",
+    "        # trainer loading and initialization\n",
+    "        trainer = get_trainer()(config, model, mg)\n",
+    "        # MMRec/src/common/trainer.py - class Trainer\n",
+    "        # debug\n",
+    "        # model training\n",
+    "        best_valid_score, best_valid_result, best_test_upon_valid = trainer.fit(train_data, valid_data=valid_data, test_data=test_data, saved=save_model)\n",
+    "        #########\n",
+    "        hyper_ret.append((hyper_tuple, best_valid_result, best_test_upon_valid))\n",
+    "\n",
+    "        # save best test\n",
+    "        if best_test_upon_valid[val_metric] > best_test_value:\n",
+    "            best_test_value = best_test_upon_valid[val_metric]\n",
+    "            best_test_idx = idx\n",
+    "        idx += 1\n",
+    "\n",
+    "        logger.info('best valid result: {}'.format(dict2str(best_valid_result)))\n",
+    "        logger.info('test result: {}'.format(dict2str(best_test_upon_valid)))\n",
+    "        logger.info('████Current BEST████:\\nParameters: {}={},\\n'\n",
+    "                    'Valid: {},\\nTest: {}\\n\\n\\n'.format(config['hyper_parameters'],\n",
+    "            hyper_ret[best_test_idx][0], dict2str(hyper_ret[best_test_idx][1]), dict2str(hyper_ret[best_test_idx][2])))\n",
+    "        \"\"\"\n",
+    "        Tue 16 Jul 2024 19:49:15 INFO best valid result: recall@5: 0.0340    recall@10: 0.0538    recall@20: 0.0861    recall@50: 0.1460    ndcg@5: 0.0229    ndcg@10: 0.0293    ndcg@20: 0.0375    ndcg@50: 0.0495    precision@5: 0.0071    precision@10: 0.0057    precision@20: 0.0046    precision@50: 0.0031    map@5: 0.0190    map@10: 0.0216    map@20: 0.0238    map@50: 0.0256    \n",
+    "Tue 16 Jul 2024 19:49:15 INFO test result: recall@5: 0.0331    recall@10: 0.0547    recall@20: 0.0871    recall@50: 0.1493    ndcg@5: 0.0217    ndcg@10: 0.0287    ndcg@20: 0.0371    ndcg@50: 0.0496    precision@5: 0.0074    precision@10: 0.0061    precision@20: 0.0048    precision@50: 0.0033    map@5: 0.0173    map@10: 0.0201    map@20: 0.0224    map@50: 0.0243    \n",
+    "Tue 16 Jul 2024 19:49:15 INFO ████Current BEST████:\n",
+    "Parameters: ['seed', 'n_layers', 'reg_weight', 'dropout']=(999, 1, 0.1, 0.3),\n",
+    "Valid: recall@5: 0.0340    recall@10: 0.0538    recall@20: 0.0861    recall@50: 0.1460    ndcg@5: 0.0229    ndcg@10: 0.0293    ndcg@20: 0.0375    ndcg@50: 0.0495    precision@5: 0.0071    precision@10: 0.0057    precision@20: 0.0046    precision@50: 0.0031    map@5: 0.0190    map@10: 0.0216    map@20: 0.0238    map@50: 0.0256    ,\n",
+    "Test: recall@5: 0.0331    recall@10: 0.0547    recall@20: 0.0871    recall@50: 0.1493    ndcg@5: 0.0217    ndcg@10: 0.0287    ndcg@20: 0.0371    ndcg@50: 0.0496    precision@5: 0.0074    precision@10: 0.0061    precision@20: 0.0048    precision@50: 0.0033    map@5: 0.0173    map@10: 0.0201    map@20: 0.0224    map@50: 0.0243    \n",
+    "\n",
+    "        \"\"\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "models.bm3.BM3"
+      ]
+     },
+     "execution_count": 26,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "get_model(config['model'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "AttributeError",
+     "evalue": "'dok_matrix' object has no attribute '_update'",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mAttributeError\u001b[0m                            Traceback (most recent call last)",
+      "Cell \u001b[0;32mIn[28], line 1\u001b[0m\n\u001b[0;32m----> 1\u001b[0m \u001b[43mget_model\u001b[49m\u001b[43m(\u001b[49m\u001b[43mconfig\u001b[49m\u001b[43m[\u001b[49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[38;5;124;43mmodel\u001b[39;49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[43m]\u001b[49m\u001b[43m)\u001b[49m\u001b[43m(\u001b[49m\u001b[43mconfig\u001b[49m\u001b[43m,\u001b[49m\u001b[43m \u001b[49m\u001b[43mtrain_data\u001b[49m\u001b[43m)\u001b[49m\u001b[38;5;241m.\u001b[39mto(config[\u001b[38;5;124m'\u001b[39m\u001b[38;5;124mdevice\u001b[39m\u001b[38;5;124m'\u001b[39m])\n",
+      "File \u001b[0;32m~/MMRec/src/models/bm3.py:37\u001b[0m, in \u001b[0;36mBM3.__init__\u001b[0;34m(self, config, dataset)\u001b[0m\n\u001b[1;32m     34\u001b[0m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_nodes \u001b[38;5;241m=\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_users \u001b[38;5;241m+\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_items\n\u001b[1;32m     36\u001b[0m \u001b[38;5;66;03m# load dataset info\u001b[39;00m\n\u001b[0;32m---> 37\u001b[0m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mnorm_adj \u001b[38;5;241m=\u001b[39m \u001b[38;5;28;43mself\u001b[39;49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43mget_norm_adj_mat\u001b[49m\u001b[43m(\u001b[49m\u001b[43mdataset\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43minter_matrix\u001b[49m\u001b[43m(\u001b[49m\u001b[43mform\u001b[49m\u001b[38;5;241;43m=\u001b[39;49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[38;5;124;43mcoo\u001b[39;49m\u001b[38;5;124;43m'\u001b[39;49m\u001b[43m)\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43mastype\u001b[49m\u001b[43m(\u001b[49m\u001b[43mnp\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43mfloat32\u001b[49m\u001b[43m)\u001b[49m\u001b[43m)\u001b[49m\u001b[38;5;241m.\u001b[39mto(\u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mdevice)\n\u001b[1;32m     39\u001b[0m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39muser_embedding \u001b[38;5;241m=\u001b[39m nn\u001b[38;5;241m.\u001b[39mEmbedding(\u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_users, \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39membedding_dim)\n\u001b[1;32m     40\u001b[0m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mitem_id_embedding \u001b[38;5;241m=\u001b[39m nn\u001b[38;5;241m.\u001b[39mEmbedding(\u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_items, \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39membedding_dim)\n",
+      "File \u001b[0;32m~/MMRec/src/models/bm3.py:67\u001b[0m, in \u001b[0;36mBM3.get_norm_adj_mat\u001b[0;34m(self, interaction_matrix)\u001b[0m\n\u001b[1;32m     63\u001b[0m data_dict \u001b[38;5;241m=\u001b[39m \u001b[38;5;28mdict\u001b[39m(\u001b[38;5;28mzip\u001b[39m(\u001b[38;5;28mzip\u001b[39m(inter_M\u001b[38;5;241m.\u001b[39mrow, inter_M\u001b[38;5;241m.\u001b[39mcol \u001b[38;5;241m+\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_users),\n\u001b[1;32m     64\u001b[0m                      [\u001b[38;5;241m1\u001b[39m] \u001b[38;5;241m*\u001b[39m inter_M\u001b[38;5;241m.\u001b[39mnnz))\n\u001b[1;32m     65\u001b[0m data_dict\u001b[38;5;241m.\u001b[39mupdate(\u001b[38;5;28mdict\u001b[39m(\u001b[38;5;28mzip\u001b[39m(\u001b[38;5;28mzip\u001b[39m(inter_M_t\u001b[38;5;241m.\u001b[39mrow \u001b[38;5;241m+\u001b[39m \u001b[38;5;28mself\u001b[39m\u001b[38;5;241m.\u001b[39mn_users, inter_M_t\u001b[38;5;241m.\u001b[39mcol),\n\u001b[1;32m     66\u001b[0m                           [\u001b[38;5;241m1\u001b[39m] \u001b[38;5;241m*\u001b[39m inter_M_t\u001b[38;5;241m.\u001b[39mnnz)))\n\u001b[0;32m---> 67\u001b[0m \u001b[43mA\u001b[49m\u001b[38;5;241;43m.\u001b[39;49m\u001b[43m_update\u001b[49m(data_dict)\n\u001b[1;32m     68\u001b[0m \u001b[38;5;66;03m# norm adj matrix\u001b[39;00m\n\u001b[1;32m     69\u001b[0m sumArr \u001b[38;5;241m=\u001b[39m (A \u001b[38;5;241m>\u001b[39m \u001b[38;5;241m0\u001b[39m)\u001b[38;5;241m.\u001b[39msum(axis\u001b[38;5;241m=\u001b[39m\u001b[38;5;241m1\u001b[39m)\n",
+      "\u001b[0;31mAttributeError\u001b[0m: 'dok_matrix' object has no attribute '_update'"
+     ]
+    }
+   ],
+   "source": [
+    "get_model(config['model'])(config, train_data).to(config['device'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def pretrain_setup(self):\n",
+    "        \"\"\"\n",
+    "        Reset dataloader. Outputing the same positive & negative samples with each training.\n",
+    "        :return:\n",
+    "        \"\"\"\n",
+    "     # sort & random\n",
+    "    if self.shuffle:\n",
+    "        self.dataset = self.dataset_bk.copy(self.dataset_bk.df)\n",
+    "    self.all_items.sort()\n",
+    "    if self.use_full_sampling:\n",
+    "        self.all_uids.sort()\n",
+    "    random.shuffle(self.all_items)\n",
+    "    # reorder dataset as default (chronological order)\n",
+    "    #self.dataset.sort_by_chronological()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_model(model_name):\n",
+    "    r\"\"\"Automatically select model class based on model name\n",
+    "    Args:\n",
+    "        model_name (str): model name\n",
+    "    Returns:\n",
+    "        Recommender: model class\n",
+    "    \"\"\"\n",
+    "    model_file_name = model_name.lower()\n",
+    "    module_path = '.'.join(['models', model_file_name])\n",
+    "    if importlib.util.find_spec(module_path, __name__):\n",
+    "        model_module = importlib.import_module(module_path, __name__)\n",
+    "\n",
+    "    model_class = getattr(model_module, model_name)\n",
+    "    return model_class"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_trainer():\n",
+    "    return getattr(importlib.import_module('common.trainer'), 'Trainer')\n",
+    "# MMRec/src/common/trainer.py"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class Trainer(AbstractTrainer):\n",
+    "    r\"\"\"The basic Trainer for basic training and evaluation strategies in recommender systems. This class defines common\n",
+    "    functions for training and evaluation processes of most recommender system models, including fit(), evaluate(),\n",
+    "   and some other features helpful for model training and evaluation.\n",
+    "\n",
+    "   Training과 Evaluation 과정의 common function에 대한 정의 - fit(), evaluate()\n",
+    "\n",
+    "    Generally speaking, this class can serve most recommender system models, If the training process of the model is to\n",
+    "    simply optimize a single loss without involving any complex training strategies, such as adversarial learning,\n",
+    "    pre-training and so on.\n",
+    "\n",
+    "    Initializing the Trainer needs two parameters: `config` and `model`. `config` records the parameters information\n",
+    "    for controlling training and evaluation, such as `learning_rate`, `epochs`, `eval_step` and so on.\n",
+    "    More information can be found in [placeholder]. `model` is the instantiated object of a Model Class.\n",
+    "\n",
+    "    \"\"\"\n",
+    "\n",
+    "    def __init__(self, config, model, mg=False):\n",
+    "        super(Trainer, self).__init__(config, model)\n",
+    "\n",
+    "        # 학습 정보 받음\n",
+    "        self.logger = getLogger()\n",
+    "        self.learner = config['learner']\n",
+    "        self.learning_rate = config['learning_rate']\n",
+    "        self.epochs = config['epochs']\n",
+    "        self.eval_step = min(config['eval_step'], self.epochs)\n",
+    "        self.stopping_step = config['stopping_step']\n",
+    "        self.clip_grad_norm = config['clip_grad_norm']\n",
+    "        self.valid_metric = config['valid_metric'].lower()\n",
+    "        self.valid_metric_bigger = config['valid_metric_bigger']\n",
+    "        self.test_batch_size = config['eval_batch_size']\n",
+    "        self.device = config['device']\n",
+    "        self.weight_decay = 0.0\n",
+    "        if config['weight_decay'] is not None:\n",
+    "            wd = config['weight_decay']\n",
+    "            self.weight_decay = eval(wd) if isinstance(wd, str) else wd\n",
+    "\n",
+    "        self.req_training = config['req_training']\n",
+    "\n",
+    "        self.start_epoch = 0\n",
+    "        self.cur_step = 0\n",
+    "\n",
+    "        tmp_dd = {}\n",
+    "        for j, k in list(itertools.product(config['metrics'], config['topk'])):\n",
+    "            tmp_dd[f'{j.lower()}@{k}'] = 0.0\n",
+    "        self.best_valid_score = -1\n",
+    "        self.best_valid_result = tmp_dd\n",
+    "        self.best_test_upon_valid = tmp_dd\n",
+    "        self.train_loss_dict = dict()\n",
+    "        self.optimizer = self._build_optimizer()\n",
+    "\n",
+    "        #fac = lambda epoch: 0.96 ** (epoch / 50)\n",
+    "        lr_scheduler = config['learning_rate_scheduler']        # check zero?\n",
+    "        fac = lambda epoch: lr_scheduler[0] ** (epoch / lr_scheduler[1])\n",
+    "        scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=fac)\n",
+    "        self.lr_scheduler = scheduler\n",
+    "\n",
+    "        self.eval_type = config['eval_type']\n",
+    "        self.evaluator = TopKEvaluator(config)\n",
+    "\n",
+    "        self.item_tensor = None\n",
+    "        self.tot_item_num = None\n",
+    "        self.mg = mg\n",
+    "        self.alpha1 = config['alpha1']\n",
+    "        self.alpha2 = config['alpha2']\n",
+    "        self.beta = config['beta']\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "    def fit(self, train_data, valid_data=None, test_data=None, saved=False, verbose=True):\n",
+    "        r\"\"\"Train the model based on the train data and the valid data.\n",
+    "        train data와 valid data에 기초해서 모델을 학습 시킴/\n",
+    "\n",
+    "        Args:\n",
+    "            train_data (DataLoader): the train data\n",
+    "            valid_data (DataLoader, optional): the valid data, default: None.\n",
+    "                                               If it's None, the early_stopping is invalid.\n",
+    "            test_data (DataLoader, optional): None\n",
+    "            verbose (bool, optional): whether to write training and evaluation information to logger, default: True\n",
+    "            saved (bool, optional): whether to save the model parameters, default: True\n",
+    "\n",
+    "        Returns:\n",
+    "             (float, dict): best valid score and best valid result. If valid_data is None, it returns (-1, None)\n",
+    "        \"\"\"\n",
+    "        for epoch_idx in range(self.start_epoch, self.epochs):\n",
+    "            # train\n",
+    "            training_start_time = time()\n",
+    "            self.model.pre_epoch_processing()\n",
+    "            train_loss, _ = self._train_epoch(train_data, epoch_idx) # train_epoch  함수에서 loss\n",
+    "            if torch.is_tensor(train_loss):\n",
+    "                # get nan loss\n",
+    "                break\n",
+    "            #for param_group in self.optimizer.param_groups:\n",
+    "            #    print('======lr: ', param_group['lr'])\n",
+    "            self.lr_scheduler.step()\n",
+    "\n",
+    "            # train loss dictionary에 저장\n",
+    "            self.train_loss_dict[epoch_idx] = sum(train_loss) if isinstance(train_loss, tuple) else train_loss\n",
+    "            training_end_time = time()\n",
+    "            train_loss_output = \\\n",
+    "                self._generate_train_loss_output(epoch_idx, training_start_time, training_end_time, train_loss)\n",
+    "            post_info = self.model.post_epoch_processing()\n",
+    "            if verbose:\n",
+    "                self.logger.info(train_loss_output)\n",
+    "                if post_info is not None:\n",
+    "                    self.logger.info(post_info)\n",
+    "\n",
+    "            # eval: To ensure the test result is the best model under validation data, set self.eval_step == 1\n",
+    "            if (epoch_idx + 1) % self.eval_step == 0:\n",
+    "                valid_start_time = time()\n",
+    "                valid_score, valid_result = self._valid_epoch(valid_data)\n",
+    "                self.best_valid_score, self.cur_step, stop_flag, update_flag = early_stopping(\n",
+    "                    valid_score, self.best_valid_score, self.cur_step,\n",
+    "                    max_step=self.stopping_step, bigger=self.valid_metric_bigger)\n",
+    "                valid_end_time = time()\n",
+    "                valid_score_output = \"epoch %d evaluating [time: %.2fs, valid_score: %f]\" % \\\n",
+    "                                     (epoch_idx, valid_end_time - valid_start_time, valid_score)\n",
+    "                valid_result_output = 'valid result: \\n' + dict2str(valid_result)\n",
+    "                # test\n",
+    "                _, test_result = self._valid_epoch(test_data)\n",
+    "                if verbose:\n",
+    "                    self.logger.info(valid_score_output)\n",
+    "                    self.logger.info(valid_result_output)\n",
+    "                    self.logger.info('test result: \\n' + dict2str(test_result))\n",
+    "                if update_flag:\n",
+    "                    update_output = '██ ' + self.config['model'] + '--Best validation results updated!!!'\n",
+    "                    if verbose:\n",
+    "                        self.logger.info(update_output)\n",
+    "                    self.best_valid_result = valid_result\n",
+    "                    self.best_test_upon_valid = test_result\n",
+    "\n",
+    "                if stop_flag:\n",
+    "                    stop_output = '+++++Finished training, best eval result in epoch %d' % \\\n",
+    "                                  (epoch_idx - self.cur_step * self.eval_step)\n",
+    "                    if verbose:\n",
+    "                        self.logger.info(stop_output)\n",
+    "                    break\n",
+    "        return self.best_valid_score, self.best_valid_result, self.best_test_upon_valid\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# log info\n",
+    "    logger.info('\\n============All Over=====================')\n",
+    "    for (p, k, v) in hyper_ret:\n",
+    "        logger.info('Parameters: {}={},\\n best valid: {},\\n best test: {}'.format(config['hyper_parameters'],\n",
+    "                                                                                  p, dict2str(k), dict2str(v)))\n",
+    "\n",
+    "    logger.info('\\n\\n█████████████ BEST ████████████████')\n",
+    "    logger.info('\\tParameters: {}={},\\nValid: {},\\nTest: {}\\n\\n'.format(config['hyper_parameters'],\n",
+    "                                                                   hyper_ret[best_test_idx][0],\n",
+    "                                                                   dict2str(hyper_ret[best_test_idx][1]),\n",
+    "                                                                   dict2str(hyper_ret[best_test_idx][2])))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 33,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[('Recall', 5),\n",
+       " ('Recall', 10),\n",
+       " ('Recall', 20),\n",
+       " ('Recall', 50),\n",
+       " ('NDCG', 5),\n",
+       " ('NDCG', 10),\n",
+       " ('NDCG', 20),\n",
+       " ('NDCG', 50),\n",
+       " ('Precision', 5),\n",
+       " ('Precision', 10),\n",
+       " ('Precision', 20),\n",
+       " ('Precision', 50),\n",
+       " ('MAP', 5),\n",
+       " ('MAP', 10),\n",
+       " ('MAP', 20),\n",
+       " ('MAP', 50)]"
+      ]
+     },
+     "execution_count": 33,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "import itertools\n",
+    "list(itertools.product(config['metrics'], config['topk']))"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.10.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
